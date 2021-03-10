@@ -1,5 +1,5 @@
 const { default: axios } = require('axios');
-const { getISTtime, nseWorkingTime } = require('./niftyfunctions'); 
+//const { getISTtime, nseWorkingTime } = require('./niftyfunctions'); 
 var router = express.Router();
 let NiftyRes;
 // const NSE_NIFTY = {"_id":"5fd88d6688e28d0c64ecd6d0","nid":2,"niftyName":"NIFTY","niftyCode":-10006,"__v":0};
@@ -11,7 +11,6 @@ router.use('/', function(req, res, next) {
   if (!db_connection) { senderr(DBERROR, ERR_NODB); return; }
   next('route');
 });
-
 
 
 router.get('/additem/:name/:code', async function (req, res, next) {
@@ -55,34 +54,6 @@ router.get('/test/:timevalue', async function (req, res, next) {
   // console.log(finalDate);
   sendok(myDate);
 });
-
-function add_pe_data(record, PE) {
-  // console.log(record);
-  record["pe_openInterest"] = PE.openInterest;
-  record["pe_changeinOpenInterest"] = PE.changeinOpenInterest;
-  record["pe_totalTradedVolume"] = PE.totalTradedVolume;
-  record["pe_impliedVolatility"] = PE.impliedVolatility;
-  record["pe_lastPrice"] = PE.lastPrice;
-  record["pe_pChange"] = PE.pChange;
-  record["pe_bidQty"] = PE.bidQty;
-  record["pe_bidprice"] = PE.bidprice;
-  record['pe_askQty'] = PE.askQty;
-  record["pe_askPrice"] = PE.askPrice;
-}
-
-function add_ce_data(record, CE) {
-  // console.log(CE);
-  record["ce_openInterest"] = CE.openInterest;
-  record["ce_changeinOpenInterest"] = CE.changeinOpenInterest;
-  record["ce_totalTradedVolume"] = CE.totalTradedVolume;
-  record["ce_impliedVolatility"] = CE.impliedVolatility;
-  record["ce_lastPrice"] = CE.lastPrice;
-  record["ce_pChange"] = CE.pChange;
-  record["ce_bidQty"] = CE.bidQty;
-  record["ce_bidprice"] = CE.bidprice;
-  record['ce_askQty'] = CE.askQty;
-  record["ce_askPrice"] = CE.askPrice;
-}
 
 router.get('/getnsedata/:nseName/:expiryDate/:myRange', async function (req, res, next) {
   NiftyRes = res;
@@ -138,8 +109,6 @@ async function publishHolidays(year) {
 
 const nonNiftyUrl = `https://www1.nseindia.com/live_market/dynaContent/live_watch/option_chain/optionKeys.jsp?symbolCode={niftyCode}&symbol={niftyName}&symbol={niftyName}&instrument=OPTSTK&date=-&segmentLink=17&segmentLink=17`
 // const niftyUrl = `https://www1.nseindia.com/live_market/dynaContent/live_watch/option_chain/optionKeys.jsp?symbolCode=-10006&symbol=NIFTY&symbol=NIFTY&instrument=-&date=-&segmentLink=17&symbolCount=2&segmentLink=17`;
-const niftyUrl_prefix = "https://www.nseindia.com/api/option-chain-indices?symbol=";
-const niftyUrl_postfix = "";
 // / Equivalent to `axios.get('https://httpbin.org/get?answer=42')`
 // const res = await axios.get('https://httpbin.org/get', { params: { answer: 42 } });
 
@@ -147,36 +116,11 @@ const niftyUrl_postfix = "";
 function get_nseindia_URL(nRec)
 { 
   // console.log(nRec);
-  let myUrl = niftyUrl_prefix + nRec.niftyName + niftyUrl_postfix;
+  
   // let myUrl = "'https://www.nseindia.com/api/option-chain-indices', { params: { symbol: 'NIFTY' } }"
   return myUrl;
 }
 
-async function axiosNiftyData(iREC) {
-  // first get the url string to get data
-  let myUrl = get_nseindia_URL(iREC);
-  console.log(myUrl);
-  console.log(`AXIOS call------- ${myUrl}`);
-  try {
-    // let niftyres = await axios.get(myUrl,{
-    //   proxy: {
-    //     host: '127.0.0.1',
-    //     port: 80
-    //   }});
-    let niftyres = await axios.get(myUrl,{
-      headers: {"Access-Control-Allow-Origin": "*"
-        //"Access-Control-Allow-Headers": "Origin, X-Requested-With, Content-Type, Accept"
-      }
-    });
-    //console.log(`Status is ${JSON.stringify(niftyres)}`);
-    // console.log(niftyres.data);
-    return {sts: true, data: niftyres.data};
-  } catch (error) {
-    console.log("error from site using AXIOS")
-    console.log(error);
-    return {sts: false, data: []};
-  }
-}
 
 async function noproxy_axiosNiftyData(iREC) {
   // first get the url string to get data
@@ -212,74 +156,14 @@ console.log(res);
 return {sts: true, data: json};
 }
 
-async function fetchNiftyData(iREC) {
-  let retryCount = nseRetry;
-  while (retryCount > 0) {
-    console.log(retryCount);
-    let xxx = await axiosNiftyData(iREC);
-    console.log(`Status is ${xxx.sts}`);
-    if (xxx.sts) return (xxx.data);
-    // console.log("about to sleep");
-    --retryCount;
-    await sleep(nseSleep);
-  }
-  return;
-}
-
-
-async function read_nse_data(myNiftyRec) {
-  var dataFromNSEapi = await fetchNiftyData(myNiftyRec);
-  if (dataFromNSEapi === undefined) {return;};
-
-  // has data. Now process data
-  // dataFromNSEapi.records.expiryDates = ["17-Dec-2020","24-Dec-2020","31-Dec-2020","07-Jan-2021","14-Jan-2021","21-Jan-2021","28-Jan-2021","04-Feb-2021","11-Feb-2021","25-Feb-2021","25-Mar-2021","24-Jun-2021","30-Sep-2021","30-Dec-2021","30-Jun-2022","29-Dec-2022","29-Jun-2023","28-Dec-2023","27-Jun-2024","26-Dec-2024","26-Jun-2025"]
-  let currtime = new Date().getTime();
-  let myData = dataFromNSEapi.records.data;
-  // let myData = dataFromNSEapi.filtered.data;
-  let niftyData = [];
-  let expiryData = [];
-  myData.forEach(rec => {
-    // first find if entry of date is there
-    // let myKey = datePriceKey(rec.expiryDate, rec.strikePrice);
-    eRec = _.find(expiryData, x => x.expiryDate === rec.expiryDate);
-    if (!eRec) {
-      eRec = new ExpiryDate({
-        nseName: myNiftyRec.niftyName,
-        expiryDate: rec.expiryDate,
-        revDate: revDate(rec.expiryDate),
-        time: currtime,
-        timestamp: dataFromNSEapi.records.timestamp,
-        underlyingValue: dataFromNSEapi.records.underlyingValue,
-      });
-      expiryData.push(eRec);
-    }
-    let myRec = _.find(niftyData, x => x.expiryDate === rec.expiryDate && x.strikePrice == rec.strikePrice);
-    if (!myRec) {
-      myRec = getBlankNSEDataRec();
-      myRec.nseName = myNiftyRec.niftyName;
-      myRec.expiryDate = rec.expiryDate;
-      myRec.strikePrice = rec.strikePrice;
-      myRec.time = currtime;
-      niftyData.push(myRec);
-    }
-    // console.log(myRec);
-    if (rec.PE !== undefined) add_pe_data(myRec, rec.PE);
-    if (rec.CE !== undefined) add_ce_data(myRec, rec.CE);
-  });
-
-  //Underlying Index: NIFTY 13711.50  As on Dec 18, 2020 12:32:23 IST 
-  // as received from nSE 18-Dec-2020 12:32:53
-  let nameTimeStr = `Underlying Index:  ${myNiftyRec.niftyName} ${dataFromNSEapi.records.underlyingValue} As on ${dataFromNSEapi.records.timestamp} IST`
-  return {dispString: nameTimeStr, niftyData: niftyData, expiryData: expiryData, underlyingValue: dataFromNSEapi.records.underlyingValue};
-}
 
 async function readalldata() {
   let allNiftyRec = await NiftyNames.find({enable: true});
   for(nRec of allNiftyRec) {
-  // await allNiftyRec.forEach(x => {
-    console.log(`Recding data of ${nRec.niftyName}`)
+    console.log(`Receiving data of ${nRec.niftyName}`)
     let myData = await read_nse_data(nRec);
-
+	if (myData == undefined) continue;
+	console.log("populate data");
     myData.niftyData.forEach(x => {
       x.save();
     })
@@ -288,8 +172,7 @@ async function readalldata() {
     myData.expiryData.forEach( x => {
       x.save();
     })
-  
-    console.log(`Recding ended of ${nRec.niftyName}`)
+    console.log(`Receiving ended of ${nRec.niftyName}`)
   }
 }
 
@@ -405,39 +288,6 @@ async function sendClientData() {
   // console.log(T2);
   console.log(`Processing all socket took time ${diff}`);
 }
-
-// schedule task
-
-
-cron.schedule('*/1 * * * *', async () => {
-  if (!db_connection) {
-    console.log("============= No mongoose connection");
-    return;
-  }   
-  let currtime = getISTtime();
-  let myMinutes = currtime.getMinutes()
-  
-  //if ((myMinutes % READNSEINTERVALMINUTES) === 0) {
-    readNseTimer = 0;
-    console.log("======== nse stock update start");
-    // if NSE is working then get data
-    let sts = await nseWorkingTime();
-    sts = true;
-    // console.log(`NEW Working time: ${sts}`)
-    if (sts) {
-      // console.log("Get nSE data");
-      readalldata();
-    }
-  //}
-  
-  //if ((myMinutes % CLIENTUPDATEINTERVALMINUTES) === 0) {
-  if (false) {
-    clientUpdateCount = 0; 
-    console.log("======== clinet update start");
-    console.log(connectionArray);
-    sendClientData(); 
-  }
-});
 
 
 function sendok(usrmsg) { NiftyRes.send(usrmsg); }

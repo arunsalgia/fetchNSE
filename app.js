@@ -7,95 +7,34 @@ cors = require('cors');
 fetch = require('node-fetch');
 _ = require("lodash");
 cron = require('node-cron');
-nodemailer = require('nodemailer');
 axios = require('axios');
 const { promisify } = require('util')
 sleep = promisify(setTimeout)
+const {
+  getLoginName, getDisplayName, cricDate,
+  encrypt, decrypt, dbencrypt, dbdecrypt,
+	dbToSvrText, svrToDbText,
+	sendCricMail,
+  userAlive,
+  getBlankNSEDataRec, getBlankCurrNSEDataRec,
+  revDate, datePriceKey,
+  getISTtime, nseWorkingTime,
+} = require('./niftyfunctions'); 
+
+
 app = express();
 PRODUCTION=false;
 
 PORT = process.env.PORT || 1961;
 http = require('http');
 httpServer = http.createServer(app);
-io = require('socket.io')(httpServer, {
-  handlePreflightRequest: (req, res) => {
-    const headers = {
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      "Access-Control-Allow-Origin": req.headers.origin, //or the specific origin you want to give access to,
-      "Access-Control-Allow-Credentials": true
-    };
-    res.writeHead(200, headers);
-    res.end();
-  }
-
-});
-
-// Routers
-router = express.Router();
-indexRouter = require('./routes/index');
-usersRouter = require('./routes/user');
-niftyRouter = require('./routes/nifty');
 
 nseRetry=5   // retry count 
 nseSleep=1000 // sleep for 1 second and try to fetch data from NSE if error while getching
-
-// maintaing list of all active client connection
-connectionArray  = [];
-masterConnectionArray  = [];
-clientData = [];
-nseData = [];
-
-READNSEINTERVAL=900;    // 900 seconds in 15 minues
-CLIENTUPDATEINTERVAL=60; //
-
-if (PRODUCTION)
-READNSEINTERVALMINUTES=15;
-else
-READNSEINTERVALMINUTES=1;
-CLIENTUPDATEINTERVALMINUTES=1;
-
-readNseTimer = 0;
-clientUpdateCount=0;
-
-
-io.on('connect', socket => {
-  app.set("socket",socket);
-  socket.on("page", (pageMessage) => {
-    console.log("page message from "+socket.id);
-    console.log(pageMessage);
-    var myClient = _.find(masterConnectionArray, x => x.socketId === socket.id);
-    if (pageMessage.page.toUpperCase().includes("NSEDATA")) {
-      myClient.page = "NSEDATA";
-      myClient.uid = parseInt(pageMessage.uid);
-      myClient.stockName = pageMessage.stockName;
-      myClient.expiryDate = pageMessage.expiryDate;
-      myClient.margin = parseInt(pageMessage.margin)
-      myClient.firstTime = true;
-      clientUpdateCount = CLIENTUPDATEINTERVAL+1;
-    } else if (pageMessage.page.toUpperCase().includes("STAT")) {
-      myClient.page = "STAT";
-      myClient.gid = parseInt(pageMessage.gid);
-      myClient.uid = parseInt(pageMessage.uid);
-      myClient.firstTime = true;
-      clientUpdateCount = CLIENTUPDATEINTERVAL+1;
-    } else if (pageMessage.page.toUpperCase().includes("AUCT")) {
-      myClient.page = "AUCT";
-      myClient.gid = parseInt(pageMessage.gid);
-      myClient.uid = parseInt(pageMessage.uid);
-      myClient.firstTime = true;
-      clientUpdateCount = CLIENTUPDATEINTERVAL+1;
-    }
-  });
-});
-
-io.sockets.on('connection', function(socket){
-  // console.log("Connected Socket = " + socket.id)
-  masterConnectionArray.push({socketId: socket.id, page: "", uid: 0});
-  socket.on('disconnect', function(){
-    _.remove(masterConnectionArray, {socketId: socket.id});
-    
-  });
-});
+READNSEINTERVAL=60;    
+UPDATENSEINTERVAL=15; // 900 seconds in 15 minues
+readTimer = 0;
+updateTimer = 0;
 
 app.set('view engine', 'html');
 app.use(logger('dev'));
@@ -105,25 +44,8 @@ app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'material-dashboard-react-master/build/')));
 app.use(express.json());
 
-
-app.use((req, res, next) => {
-  if (req.url.includes("admin")||req.url.includes("signIn")||req.url.includes("Logout")) {
-    req.url = "/";
-    res.redirect('/');
-  }
-  else {
-    next();
-  }
-
-});
-
-app.use('/', indexRouter);
-app.use('/user', usersRouter);
-app.use('/nifty', niftyRouter);
-
 // ---- start of globals
 
-//Schema
 //Schema
 MasterSettingsSchema = mongoose.Schema ({
   msid: Number,
@@ -194,97 +116,38 @@ HolidaySchema = mongoose.Schema({
   yearMonthDay: String, /// string in YYYYMMDD format. It can be used for sorting
 });
 
-// table name will be <tournament Name>_brief r.g. IPL2020_brief
-
 // models
 MasterData = mongoose.model("MasterSettings", MasterSettingsSchema)
 User = mongoose.model("users", UserSchema);
 NiftyNames = mongoose.model("niftynames", NiftySchema);
-NSEData = mongoose.model("nse_data", NSEDataSchema)
-ExpiryDate = mongoose.model("expirydate", ExpiryDateSchema)
 Holiday = mongoose.model("holiday", HolidaySchema)
+// for historical
+NSEData = mongoose.model("nse_data", NSEDataSchema);
+ExpiryDate = mongoose.model("expirydate", ExpiryDateSchema)
+// for current display
+CurrNSEData = mongoose.model("curr_nse_data", NSEDataSchema);
+CurrExpiryDate = mongoose.model("curr_expirydate", ExpiryDateSchema)
 
-getBlankNSEDataRec = function () {
-  let myblankRec = new NSEData();
-  myblankRec.nseName = "";
-  myblankRec.expiryDate = "";
-  myblankRec.strikePrice = 0;
-  myblankRec.time = 0;
-  myblankRec.underlyingValue = 0;
-  myblankRec.pe_openInterest = 0;
-  myblankRec.pe_changeinOpenInterest = 0;
-  myblankRec.pe_totalTradedVolume = 0;
-  myblankRec.pe_impliedVolatility = 0;
-  myblankRec.pe_lastPrice = 0;
-  myblankRec.pe_pChange = 0;
-  myblankRec.pe_bidQty = 0;
-  myblankRec.pe_bidprice = 0;
-  myblankRec.pe_askQty = 0;
-  myblankRec.pe_askPrice = 0;
-  myblankRec.ce_openInterest = 0;
-  myblankRec.ce_changeinOpenInterest = 0;
-  myblankRec.ce_totalTradedVolume = 0;
-  myblankRec.ce_impliedVolatility = 0;
-  myblankRec.ce_lastPrice = 0;
-  myblankRec.ce_pChange = 0;
-  myblankRec.ce_bidQty = 0;
-  myblankRec.ce_bidprice = 0;
-  myblankRec.ce_askQty = 0;
-  myblankRec.ce_askPrice = 0;
-  // console.log(myblankRec);
-  return myblankRec;
 
-}
-
-router = express.Router();
+//router = express.Router();
 
 db_connection = false;      // status of mongoose connection
 connectRequest = true;
-// constant used by routers
-minutesIST = 330;    // IST time zone in minutes 330 i.e. GMT+5:30
-minutesDay = 1440;   // minutes in a day 24*60 = 1440
-SHORTMONTHNAME = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-MONTHNAME = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-weekDays = new Array("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday");
-weekShortDays = new Array("Sun", "Mon", "Tue", "Wedn", "Thu", "Fri", "Sat");
-
-SENDRES = 1;        // send OK response
-SENDSOCKET = 2;     // send data on socket
 
 // Error messages
 DBERROR = 990;
 DBFETCHERR = 991;
 CRICFETCHERR = 992;
-ERR_NODB = "No connection to CricDream database";
-
-// Bid amount given to user when he/she joins group 1
-GROUP1_MAXBALANCE = 1000;
-allUSER = 99999999;
-
-// Number of hours after which match details to be read frpom cricapi.
-MATCHREADINTERVAL = 3;
-
-// Wallet 
-
-// match id for record which has bonus score for  Maximum Run and Maximum Wicket
-// Note that it has be be set -ve
-
-// variables rreuiqred by timer
-serverTimer = 0;
-
-// time interval for scheduler
-serverUpdateInterval = 10; // in seconds. INterval after which data to be updated to server
+ERR_NODB = "No connection to NSE database";
 
 // ----------------  end of globals
 
 // make mogoose connection
 
 // connection string for database
-//mongoose_conn_string = "mongodb+srv://akshama:akshama@cluster0-urc6p.mongodb.net/IPL2020";
 mongoose_conn_string = "mongodb+srv://ArpanaSalgia:Arpana%4001@niftydata.alj4u.mongodb.net/NIFTY?authSource=admin&replicaSet=atlas-kvq10m-shard-0&readPreference=primary&appname=MongoDB%20Compass&ssl=true"
 
 // Create the database connection 
-//mongoose.connect(mongoose_conn_string);
 mongoose.connect(mongoose_conn_string, { useNewUrlParser: true, useUnifiedTopology: true });
 
 // CONNECTION EVENTS
@@ -320,8 +183,6 @@ process.on('SIGINT', function () {
 
 // schedule task
 cron.schedule('*/15 * * * * *', () => {
-  // console.log('running every 15 second');
-  // console.log(`db_connection: ${db_connection}    connectREquest: ${connectRequest}`);
   if (!connectRequest)
     mongoose.connect(mongoose_conn_string, { useNewUrlParser: true, useUnifiedTopology: true });
 });
@@ -334,159 +195,192 @@ httpServer.listen(PORT, () => {
 });
 
 
-// global functions
-
-const AMPM = [
-  "AM", "AM", "AM", "AM", "AM", "AM", "AM", "AM", "AM", "AM", "AM", "AM",
-  "PM", "PM", "PM", "PM", "PM", "PM", "PM", "PM", "PM", "PM", "PM", "PM"
-];
-  /**
- * @param {Date} d The date
- */
-
-cricDate = function (d)  {
-  var xxx = getISTtime();
-
-  var myHour = xxx.getHours();
-  var myampm = AMPM[myHour];
-  if (myHour > 12) myHour -= 12;
-  var tmp = `${MONTHNAME[xxx.getMonth()]} ${("0" + xxx.getDate()).slice(-2)} ${("0" + myHour).slice(-2)}:${("0" +  xxx.getMinutes()).slice(-2)}${myampm}`
-  return tmp;
-}
-
-const notToConvert = ['XI', 'ARUN']
-/**
- * @param {string} t The date
- */
-
-cricTeamName = function (t)  {
-  var tmp = t.split(' ');
-  for(i=0; i < tmp.length; ++i)  {
-    var x = tmp[i].trim().toUpperCase();
-    if (notToConvert.includes(x))
-      tmp[i] = x;
-    else
-      tmp[i] = x.substr(0, 1) + x.substr(1, x.length - 1).toLowerCase();
-  }
-  return tmp.join(' ');
-}
-
-getLoginName = function (name) {
-  return name.toLowerCase().replace(/\s/g, "");
-}
-
-getDisplayName = function (name) {
-  var xxx = name.split(" ");
-  xxx.forEach( x => { 
-    x = x.trim()
-    x = x.substr(0,1).toUpperCase() +
-      (x.length > 1) ? x.substr(1, x.length-1).toLowerCase() : "";
-  });
-  return xxx.join(" ");
-}
-
-masterRec = null;
-joinOffer=500;
-
-fetchMasterSettings = async function () {
-    let tmp = await MasterData.find();
-    masterRec = tmp[0];  
-}
-
-USERTYPE = { TRIAL: 0, SUPERUSER: 1, PAID: 2}
-
-userAlive = async function (uRec) {
-  let sts = false;
-  if (uRec) {
-    switch (uRec.userPlan) {
-      case USERTYPE.SUPERUSER:
-        sts = true;
-        break;
-      case  USERTYPE.PAID:
-        sts = true;
-        break;
-      case  USERTYPE.TRIAL:
-        let cTime = new Date();
-        await fetchMasterSettings(); 
-        // console.log(masterRec);
-        let tTime = new Date(masterRec.trialExpiry);
-        // console.log(cTime);
-        // console.log(tTime);
-        sts =  (tTime.getTime() > cTime.getTime());
-        break;
+// schedule task
+let firstTime = true;
+cron.schedule('*/1 * * * * *', async () => {
+  // check mongoose connection
+  if (!db_connection) {
+    console.log("============= No mongoose connection");
+    firstTime = true;
+    return;
+  }   
+  // is it time to read data
+  if (++readTimer > READNSEINTERVAL) {
+    console.log(`-----------------------Start of schedule`);
+    readTimer = 0;
+    let writeToDb = false;
+    if (++updateTimer > UPDATENSEINTERVAL) {
+      writeToDb = true;
+      updateTimer = 0;
     }
-  }
-  return sts;
-}
+    console.log(`======== nse stock update start. DBWRITE: ${writeToDb}`);
+    // if NSE is working then get data
+    let sts = await nseWorkingTime();
+    //sts = true;  //---------------------- for testing
+    //console.log(`NEW Working time: ${sts}`)
+    if (sts) {
+      let allNiftyRec = await NiftyNames.find({enable: true});
+      for(nRec of allNiftyRec) {
+        console.log(`Receiving data of ${nRec.niftyName}`)
+        let myData = await read_nse_data(nRec);
+        if (myData) {
+          console.log("populate data");
+          // now save as current
+          console.log(nRec.niftyName);
+          await CurrExpiryDate.deleteMany({nseName: nRec.niftyName });
+           myData.currExpiryData.forEach( x => {  x.save(); });
+          await CurrNSEData.deleteMany({nseName: nRec.niftyName });
+          console.log(myData.currNiftyData.length)
+          myData.currNiftyData.forEach(x => { x.save(); });
 
-
-
-
-
-EMAILERROR="";
-CRICDREAMEMAILID='cricketpwd@gmail.com';
-sendEmailToUser = async function(userEmailId, userSubject, userText) {
-  // USERSUBJECT='User info from CricDream';
-  // USEREMAILID='salgia.ankit@gmail.com';
-  // USERTEXT=`Dear User,
-    
-      // Greeting from CricDeam.
-  
-      // As requested by you here is login details.
-  
-      // Login Name: ${uRec.userName} 
-      // User Name : ${uRec.displayName}
-      // Password  : ${uRec.password}
-  
-      // Regards,
-      // for Cricdream.`
-    
-  var transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: CRICDREAMEMAILID,
-    pass: 'Anob@1989#93'
-  }
-  });
-  
-  var mailOptions = {
-  from: CRICDREAMEMAILID,
-  to: userEmailId,
-  subject: userSubject,
-  text: userText
-  };
-  
-  //mailOptions.to = uRec.email;
-  //mailOptions.text = 
-  
-  var status = true;
-  transporter.sendMail(mailOptions, function(error, info){
-    if (error) {
-      console.log(error);
-      EMAILERROR=error;
-      //senderr(603, error);
-      status=false;
-    } else {
-      //console.log('Email sent: ' + info.response);
-      //sendok('Email sent: ' + info.response);
+          // if write to db then write to DB
+          if (writeToDb) {
+            myData.niftyData.forEach(x => {x.save();});
+            myData.expiryData.forEach( x => { x.save() });
+          }
+        } 
+      }
     }
-    return(status);
+    console.log(`---------------------------- end of schedule`);
+  }
+});
+
+
+async function read_nse_data(myNiftyRec) {
+  var dataFromNSEapi = await fetchNiftyData(myNiftyRec);
+  console.log("just callled fetch");
+  console.log(dataFromNSEapi);
+  if (dataFromNSEapi === undefined) {return;};
+
+  // has data. Now process data
+  // dataFromNSEapi.records.expiryDates = ["17-Dec-2020","24-Dec-2020","31-Dec-2020","07-Jan-2021","14-Jan-2021","21-Jan-2021","28-Jan-2021","04-Feb-2021","11-Feb-2021","25-Feb-2021","25-Mar-2021","24-Jun-2021","30-Sep-2021","30-Dec-2021","30-Jun-2022","29-Dec-2022","29-Jun-2023","28-Dec-2023","27-Jun-2024","26-Dec-2024","26-Jun-2025"]
+  let currtime = new Date().getTime();
+  let myData = dataFromNSEapi.records.data;
+  // let myData = dataFromNSEapi.filtered.data;
+  let niftyData = [];
+  let expiryData = [];
+  let cNiftyData = [];
+  let cExpiryData = [];
+  let eRec;
+
+  myData.forEach(rec => {
+    // first find if entry of date is there
+    // let myKey = datePriceKey(rec.expiryDate, rec.strikePrice);
+    eRec = _.find(expiryData, x => x.expiryDate === rec.expiryDate);
+    if (!eRec) {
+      eRec = new ExpiryDate({
+        nseName: myNiftyRec.niftyName,
+        expiryDate: rec.expiryDate,
+        revDate: revDate(rec.expiryDate),
+        time: currtime,
+        timestamp: dataFromNSEapi.records.timestamp,
+        underlyingValue: dataFromNSEapi.records.underlyingValue,
+      });
+      expiryData.push(eRec);
+    }
+    eRec = _.find(cExpiryData, x => x.expiryDate === rec.expiryDate);
+    if (!eRec) {
+      eRec = new CurrExpiryDate({
+        nseName: myNiftyRec.niftyName,
+        expiryDate: rec.expiryDate,
+        revDate: revDate(rec.expiryDate),
+        time: currtime,
+        timestamp: dataFromNSEapi.records.timestamp,
+        underlyingValue: dataFromNSEapi.records.underlyingValue,
+      });
+      cExpiryData.push(eRec);
+    }
+
+    let myRec = _.find(niftyData, x => x.expiryDate === rec.expiryDate && x.strikePrice == rec.strikePrice);
+    if (!myRec) {
+      myRec = getBlankNSEDataRec();
+      myRec.nseName = myNiftyRec.niftyName;
+      myRec.expiryDate = rec.expiryDate;
+      myRec.strikePrice = rec.strikePrice;
+      myRec.time = currtime;
+      niftyData.push(myRec);
+    }
+    if (rec.PE !== undefined) add_pe_data(myRec, rec.PE);
+    if (rec.CE !== undefined) add_ce_data(myRec, rec.CE);
+
+    myRec = _.find(cNiftyData, x => x.expiryDate === rec.expiryDate && x.strikePrice == rec.strikePrice);
+    if (!myRec) {
+      myRec = getBlankCurrNSEDataRec();
+      myRec.nseName = myNiftyRec.niftyName;
+      myRec.expiryDate = rec.expiryDate;
+      myRec.strikePrice = rec.strikePrice;
+      myRec.time = currtime;
+      cNiftyData.push(myRec);
+    }
+    if (rec.PE !== undefined) add_pe_data(myRec, rec.PE);
+    if (rec.CE !== undefined) add_ce_data(myRec, rec.CE);
   });
+
+  //Underlying Index: NIFTY 13711.50  As on Dec 18, 2020 12:32:23 IST 
+  // as received from nSE 18-Dec-2020 12:32:53
+  let nameTimeStr = `Underlying Index:  ${myNiftyRec.niftyName} ${dataFromNSEapi.records.underlyingValue} As on ${dataFromNSEapi.records.timestamp} IST`
+  return {dispString: nameTimeStr, 
+    niftyData: niftyData, expiryData: expiryData, 
+    currNiftyData: cNiftyData, currExpiryData: cExpiryData, 
+    underlyingValue: dataFromNSEapi.records.underlyingValue};
 }
 
 
 
-revDate = function (myDate) {
-  let xxx = myDate.split('-');
-  let myIdx = SHORTMONTHNAME.indexOf(xxx[1].substr(0,3).toUpperCase()).toString();
-  if (myIdx.length === 1) myIdx = "0" + myIdx;
-  return(xxx[2]+myIdx+xxx[0]);
+const niftyUrl_prefix = "https://www.nseindia.com/api/option-chain-indices?symbol=";
+const niftyUrl_postfix = "";
+async function readAxios(iREC) {
+  // first get the url string to get data
+  let myUrl = niftyUrl_prefix + iREC.niftyName + niftyUrl_postfix;
+  //console.log(`AXIOS call------- ${myUrl}`);
+  try {
+    let niftyres = await axios.get(myUrl);
+    return {sts: true, data: niftyres.data};
+  } catch (error) {
+    console.log("error from site using AXIOS")
+    return {sts: false, data: []};
+  }
 }
 
-const zerostr = "000000";
-datePriceKey = function(myDate, strikePrice) {
-  let p1 = revDate(myDate);
-  let p3 = strikePrice.toString();
-  let p2 = (p3.length < 5) ? zerostr.substr(0, 5-p3.length) : "";
-  return(`${p1}-${p2}${p3}`)
+async function fetchNiftyData(iREC) {
+  let retryCount = nseRetry;
+  while (retryCount > 0) {
+    console.log(retryCount);
+    let xxx = await readAxios(iREC);
+    console.log(`Status is ${xxx.sts}`);
+    if (xxx.sts) return (xxx.data);
+    console.log("about to sleep");
+    --retryCount;
+    await sleep(nseSleep);
+  }
+  return;
+}
+
+
+function add_pe_data(record, PE) {
+  // console.log(record);
+  record["pe_openInterest"] = PE.openInterest;
+  record["pe_changeinOpenInterest"] = PE.changeinOpenInterest;
+  record["pe_totalTradedVolume"] = PE.totalTradedVolume;
+  record["pe_impliedVolatility"] = PE.impliedVolatility;
+  record["pe_lastPrice"] = PE.lastPrice;
+  record["pe_pChange"] = PE.pChange;
+  record["pe_bidQty"] = PE.bidQty;
+  record["pe_bidprice"] = PE.bidprice;
+  record['pe_askQty'] = PE.askQty;
+  record["pe_askPrice"] = PE.askPrice;
+}
+
+function add_ce_data(record, CE) {
+  // console.log(CE);
+  record["ce_openInterest"] = CE.openInterest;
+  record["ce_changeinOpenInterest"] = CE.changeinOpenInterest;
+  record["ce_totalTradedVolume"] = CE.totalTradedVolume;
+  record["ce_impliedVolatility"] = CE.impliedVolatility;
+  record["ce_lastPrice"] = CE.lastPrice;
+  record["ce_pChange"] = CE.pChange;
+  record["ce_bidQty"] = CE.bidQty;
+  record["ce_bidprice"] = CE.bidprice;
+  record['ce_askQty'] = CE.askQty;
+  record["ce_askPrice"] = CE.askPrice;
 }
